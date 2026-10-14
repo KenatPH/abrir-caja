@@ -34,18 +34,28 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
+      - name: Descargar cloudflared oficial
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+          Write-Host "✅ cloudflared.exe descargado para empaquetado."
+
       - name: Compilar con build.py
         run: |
           python build.py
 
-      - name: Verificar que el ejecutable existe
+      - name: Verificar archivos generados
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/AbrirCajon.exe")) {
             Write-Error "No se encontró dist/AbrirCajon.exe"
             exit 1
           }
-          Write-Host "✅ dist/AbrirCajon.exe generado exitosamente."
+          if (-not (Test-Path "dist/cloudflared.exe")) {
+            Write-Error "No se encontró dist/cloudflared.exe"
+            exit 1
+          }
+          Write-Host "✅ dist/AbrirCajon.exe y dist/cloudflared.exe generados exitosamente."
 
       - name: Crear archivo ZIP con el ejecutable y configuración
         shell: pwsh
@@ -73,6 +83,7 @@ jobs:
         with:
           files: |
             dist/AbrirCajon.exe
+            dist/cloudflared.exe
             AbrirCajon-Windows.zip
           generate_release_notes: true
         env:

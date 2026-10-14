@@ -111,10 +111,23 @@ def main():
         # Copiar archivos auxiliares necesarios a dist/
         archivos_a_copiar = [
             "config.json",
+            "cloudflared.exe",
             "app_icon_bg.ico",
             "app_icon_bg.png",
             "app_icon.png"
         ]
+
+        # Asegurar cloudflared.exe en la raíz o en dist/
+        cloudflared_dist = os.path.join("dist", "cloudflared.exe")
+        if not os.path.exists("cloudflared.exe") and not os.path.exists(cloudflared_dist):
+            print("🌐 Descargando cloudflared.exe oficial para Windows...")
+            try:
+                import urllib.request
+                url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+                urllib.request.urlretrieve(url, "cloudflared.exe")
+                print("✅ cloudflared.exe descargado exitosamente.")
+            except Exception as e:
+                print(f"⚠️ No se pudo descargar cloudflared.exe automáticamente: {e}")
 
         for archivo in archivos_a_copiar:
             if os.path.exists(archivo):

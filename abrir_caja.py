@@ -11,6 +11,7 @@ import os
 import json
 import sys
 import subprocess
+import shutil
 import threading
 try:
     import win32print
@@ -635,14 +636,58 @@ def _send_cloudflare_url_to_server(url: str):
         logger.error(traceback.format_exc())
 
 
+def obtener_ruta_cloudflared():
+    """Busca el ejecutable de cloudflared en la carpeta de la app, bundle PyInstaller o PATH"""
+    nombres = ["cloudflared.exe", "cloudflared"] if sys.platform == "win32" else ["cloudflared", "cloudflared.exe"]
+    
+    # 1. Buscar en la carpeta donde reside la aplicación (AbrirCajon.exe o script)
+    for nombre in nombres:
+        ruta_local = os.path.join(DIRECTORIO_APLICACION, nombre)
+        if os.path.isfile(ruta_local):
+            return ruta_local
+
+    # 2. Buscar en sys._MEIPASS si PyInstaller desempaquetó archivos internos
+    if hasattr(sys, '_MEIPASS'):
+        for nombre in nombres:
+            ruta_bundle = os.path.join(sys._MEIPASS, nombre)
+            if os.path.isfile(ruta_bundle):
+                return ruta_bundle
+
+    # 3. Buscar en el PATH del sistema
+    ruta_path = shutil.which("cloudflared")
+    if ruta_path:
+        return ruta_path
+
+    # Fallback por defecto
+    return "cloudflared.exe" if sys.platform == "win32" else "cloudflared"
+
+
+def existe_cloudflared():
+    """Verifica si el ejecutable de cloudflared existe localmente o en el PATH"""
+    ruta = obtener_ruta_cloudflared()
+    if os.path.isabs(ruta):
+        return os.path.isfile(ruta)
+    return shutil.which(ruta) is not None
+
+
 def _start_cloudflared_tunnel():
     """Ejecuta cloudflared tunnel y extrae la URL del output"""
     global cloudflared_process, cloudflared_url
+    if not existe_cloudflared():
+        error_msg = (
+            f"No se encontró 'cloudflared' en '{DIRECTORIO_APLICACION}' ni en el PATH. "
+            "Por favor coloca cloudflared.exe en la misma carpeta que AbrirCajon.exe."
+        )
+        print(f"ERROR: {error_msg}")
+        logger.error(error_msg)
+        return
+
+    binario_cloudflared = obtener_ruta_cloudflared()
     try:
         # Ejecutar cloudflared tunnel
-        cmd = ["cloudflared", "tunnel", "--url", f"http://localhost:{CONFIG_SERVIDOR['port']}"]
+        cmd = [binario_cloudflared, "tunnel", "--url", f"http://localhost:{CONFIG_SERVIDOR['port']}"]
         logger.info(f"Ejecutando comando: {' '.join(cmd)}")
-        print(f"INFO: Ejecutando cloudflared tunnel...")
+        print(f"INFO: Ejecutando cloudflared tunnel con: {binario_cloudflared}")
         
         # Configurar flags para ocultar la ventana de CMD en Windows
         popen_kwargs = {
@@ -682,7 +727,7 @@ def _start_cloudflared_tunnel():
                 print(f"✅ URL del túnel Cloudflare encontrada: {cloudflared_url}")
                 logger.info(f"URL del túnel Cloudflare: {cloudflared_url}")
                 
-                        # Intentar actualizar la URL en el servidor web automáticamente
+                # Intentar actualizar la URL en el servidor web automáticamente
                 # Hacerlo en un hilo separado para no bloquear
                 def enviar_url_async():
                     try:
@@ -707,6 +752,9 @@ def _start_cloudflared_tunnel():
             """Monitorea el proceso de cloudflared y lo reinicia si se cae"""
             while True:
                 time.sleep(60)  # Verificar cada minuto
+                if not existe_cloudflared():
+                    logger.warning("Cloudflared no está disponible. Monitoreo detenido.")
+                    break
                 if cloudflared_process is None or cloudflared_process.poll() is not None:
                     logger.warning("Cloudflared se cerró, reiniciando túnel...")
                     print("⚠️ Cloudflared se cerró, reiniciando túnel...")
@@ -721,7 +769,7 @@ def _start_cloudflared_tunnel():
         logger.info("Monitoreo de Cloudflare Tunnel iniciado")
             
     except FileNotFoundError:
-        error_msg = "cloudflared no se encuentra en el PATH. Por favor, instálalo."
+        error_msg = f"cloudflared no se pudo ejecutar desde '{binario_cloudflared}'."
         print(f"ERROR: {error_msg}")
         logger.error(error_msg)
     except Exception as e:
@@ -1367,6 +1415,9 @@ class MainWindow(QMainWindow):
                 mensaje_detalle.append("   - URL pública: Generándose... (espera unos segundos)")
         else:
             mensaje_detalle.append("⚠️  Cloudflare Tunnel: No está ejecutándose")
+            if not existe_cloudflared():
+                mensaje_detalle.append(f"   - No se encontró 'cloudflared.exe' en:")
+                mensaje_detalle.append(f"     {DIRECTORIO_APLICACION}")
             mensaje_detalle.append("   - CRÍTICO: Sin túnel, la web HTTPS no puede conectarse")
             mensaje_detalle.append("   - El túnel se inicia automáticamente cuando el servidor está activo")
         
@@ -1380,8 +1431,11 @@ class MainWindow(QMainWindow):
             mensaje_detalle.append("3. Si el problema persiste, verifica el firewall de Windows")
             mensaje_detalle.append("4. Revisa los logs en la consola para más detalles")
         if not cloudflared_url and servidor_activo:
-            mensaje_detalle.append("5. El túnel Cloudflare puede tardar unos segundos en generar la URL")
-            mensaje_detalle.append("6. Asegúrate de tener cloudflared instalado en el PATH")
+            if not existe_cloudflared():
+                mensaje_detalle.append("5. Coloca 'cloudflared.exe' en la misma carpeta que AbrirCajon.exe")
+            else:
+                mensaje_detalle.append("5. El túnel Cloudflare puede tardar unos segundos en generar la URL")
+                mensaje_detalle.append("6. Asegúrate de tener conexión a Internet y que el firewall no bloquee cloudflared")
         
         mensaje_completo = "\n".join(mensaje_detalle)
         
