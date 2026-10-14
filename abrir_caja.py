@@ -37,7 +37,7 @@ import requests
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QComboBox, 
                                QPushButton, QMessageBox, QSystemTrayIcon, QMenu)
-from PySide6.QtCore import Qt, QThread, Signal, QMetaObject, Q_ARG
+from PySide6.QtCore import Qt, QThread, Signal, QMetaObject, Q_ARG, QTimer
 from PySide6.QtGui import QIcon, QAction
 
 # Determinar el directorio base
@@ -79,6 +79,7 @@ DEFAULT_SERVER = "Normal (ADM)"
 servidor_thread = None
 cloudflared_process = None
 cloudflared_url = None
+cloudflared_sync_status = "none"  # "none", "pending", "ok", "error: ..."
 
 
 # ==================== FUNCIONES DE IMPRESORA ====================
@@ -521,20 +522,23 @@ def verificar_servidor_activo():
         return False, f"Error: {str(e)}"
 
 
-def _send_cloudflare_url_to_server(url: str):
+def _send_cloudflare_url_to_server(url: str) -> bool:
     """Envía la URL de cloudflared al servidor web mediante API"""
+    global cloudflared_sync_status
     try:
         config = cargar_configuracion()
         if not config:
             logger.warning("No hay configuración disponible para enviar la URL de cloudflared")
             print("ADVERTENCIA: No hay configuración disponible, no se puede enviar la URL al servidor")
-            return
+            cloudflared_sync_status = "error: sin configuración"
+            return False
         
         pin = config.get("pin", "")
         if not pin:
             logger.warning("No hay PIN configurado para enviar la URL de cloudflared")
             print("ADVERTENCIA: No hay PIN configurado, no se puede enviar la URL al servidor")
-            return
+            cloudflared_sync_status = "error: sin PIN"
+            return False
         
         # Construir la URL del endpoint API según el servidor configurado
         servidor_nombre = config.get("servidor", DEFAULT_SERVER)
@@ -551,13 +555,13 @@ def _send_cloudflare_url_to_server(url: str):
             servidor_base = alias_map.get(str(servidor_nombre).lower().strip(), SERVERS.get(DEFAULT_SERVER, "https://adm.premium-soft.com"))
 
         endpoint_url = f"{servidor_base.rstrip('/')}/Configuracion/GuardarUrlCloudflare"
-        # Datos a enviar al API
         data = {
             "pin": str(pin),
             "url": str(url),
             "id_agencia": ""  # Para abrir_caja no usamos agencia, se guarda como default
         }
         
+        cloudflared_sync_status = "pending"
         # Debug: Mostrar información detallada
         print(f"📤 Enviando URL de cloudflared al servidor:")
         print(f"   Endpoint: {endpoint_url}")
@@ -619,21 +623,29 @@ def _send_cloudflare_url_to_server(url: str):
             print(f"   URL: {url}")
             print(f"   PIN: {pin}")
             logger.info(f"URL de cloudflared guardada exitosamente en el servidor")
+            cloudflared_sync_status = "ok"
+            return True
         else:
             print(f"⚠️ Respuesta del servidor: {response_text}")
             print(f"💡 Si la respuesta no es 'true', revisa el archivo de debug en el servidor")
             logger.warning(f"Respuesta del servidor: {response_text}")
+            cloudflared_sync_status = f"error: {response_text[:30]}"
+            return False
         
     except requests.exceptions.RequestException as e:
         error_msg = f"Error al enviar URL de cloudflared al servidor: {e}"
         print(f"ERROR: {error_msg}")
         logger.error(error_msg)
+        cloudflared_sync_status = "error: conexión"
+        return False
     except Exception as e:
         error_msg = f"Error inesperado al enviar URL de cloudflared: {e}"
         print(f"ERROR: {error_msg}")
         logger.error(error_msg)
         import traceback
         logger.error(traceback.format_exc())
+        cloudflared_sync_status = "error: inesperado"
+        return False
 
 
 def obtener_ruta_cloudflared():
@@ -921,14 +933,20 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.configuracion = None
+        self.checks = {}
         self.init_ui()
         self.cargar_configuracion_ui()
         self.setup_system_tray()
         
+        # Temporizador para actualizar la verificación en tiempo real cada 3 segundos
+        self.timer_diagnostico = QTimer(self)
+        self.timer_diagnostico.timeout.connect(self.actualizar_verificacion_ui)
+        self.timer_diagnostico.start(3000)
+        
     def init_ui(self):
         """Inicializa la interfaz de usuario"""
         self.setWindowTitle("Abrir Cajón — Configuración")
-        self.setFixedSize(480, 580)
+        self.setFixedSize(500, 760)
 
         # ── Global stylesheet ─────────────────────────────────────────
         self.setStyleSheet("""
@@ -1040,6 +1058,24 @@ class MainWindow(QMainWindow):
             QPushButton#btnSecondary:pressed {
                 background-color: #161b22;
             }
+            QPushButton#btnDanger {
+                background-color: #21262d;
+                color: #f85149;
+                border: 1px solid #da3633;
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-size: 12px;
+                font-weight: 600;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+            QPushButton#btnDanger:hover {
+                background-color: #da3633;
+                color: #ffffff;
+                border-color: #f85149;
+            }
+            QPushButton#btnDanger:pressed {
+                background-color: #b62324;
+            }
             QMessageBox {
                 background-color: #161b22;
                 color: #e6edf3;
@@ -1062,9 +1098,9 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(20, 0, 20, 0)
         header_layout.setSpacing(12)
 
-        dot = QLabel("●")
-        dot.setStyleSheet("color: #238636; font-size: 22px; padding-bottom: 2px;")
-        header_layout.addWidget(dot)
+        self.header_dot = QLabel("●")
+        self.header_dot.setStyleSheet("color: #238636; font-size: 22px; padding-bottom: 2px;")
+        header_layout.addWidget(self.header_dot)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
@@ -1081,8 +1117,8 @@ class MainWindow(QMainWindow):
         # ── Content ───────────────────────────────────────────────────
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(20, 18, 20, 18)
-        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(20, 14, 20, 14)
+        content_layout.setSpacing(8)
 
         # Section: Configuración
         cfg_lbl = QLabel("CONFIGURACIÓN")
@@ -1093,14 +1129,14 @@ class MainWindow(QMainWindow):
         card = QWidget()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(10)
+        card_layout.setContentsMargins(14, 10, 14, 10)
+        card_layout.setSpacing(8)
 
         def field_row(label_text, widget):
             lbl = QLabel(label_text)
             lbl.setObjectName("fieldLabel")
             col = QVBoxLayout()
-            col.setSpacing(3)
+            col.setSpacing(2)
             col.addWidget(lbl)
             col.addWidget(widget)
             return col
@@ -1133,6 +1169,56 @@ class MainWindow(QMainWindow):
 
         content_layout.addWidget(card)
 
+        # Section: Diagnóstico en Vivo
+        diag_header = QHBoxLayout()
+        diag_lbl = QLabel("DIAGNÓSTICO EN VIVO")
+        diag_lbl.setObjectName("sectionLabel")
+        diag_header.addWidget(diag_lbl)
+        diag_header.addStretch()
+
+        self.lbl_diag_summary = QLabel("Comprobando...")
+        self.lbl_diag_summary.setStyleSheet("color: #7d8590; font-size: 11px; font-weight: 500;")
+        diag_header.addWidget(self.lbl_diag_summary)
+        content_layout.addLayout(diag_header)
+
+        # Card de Diagnóstico
+        card_diag = QWidget()
+        card_diag.setObjectName("card")
+        card_diag_layout = QVBoxLayout(card_diag)
+        card_diag_layout.setContentsMargins(14, 10, 14, 10)
+        card_diag_layout.setSpacing(6)
+
+        def crear_fila_check(titulo):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            dot = QLabel("●")
+            dot.setStyleSheet("color: #7d8590; font-size: 14px;")
+            dot.setFixedWidth(16)
+
+            lbl_title = QLabel(titulo)
+            lbl_title.setStyleSheet("color: #c9d1d9; font-size: 12px; font-weight: 500;")
+
+            lbl_value = QLabel("Comprobando...")
+            lbl_value.setStyleSheet("color: #7d8590; font-size: 11px;")
+            lbl_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+            row.addWidget(dot)
+            row.addWidget(lbl_title)
+            row.addStretch()
+            row.addWidget(lbl_value)
+            card_diag_layout.addLayout(row)
+            return {"dot": dot, "title": lbl_title, "value": lbl_value}
+
+        self.checks = {
+            "config": crear_fila_check("Configuración"),
+            "impresora": crear_fila_check("Impresora"),
+            "servidor": crear_fila_check("Servidor local HTTP"),
+            "cloudflared_bin": crear_fila_check("Binario cloudflared"),
+            "tunel": crear_fila_check("Túnel Cloudflare (HTTPS)"),
+            "sync": crear_fila_check("Sincronización Web"),
+        }
+        content_layout.addWidget(card_diag)
+
         # Section: Estado
         status_lbl = QLabel("ESTADO DEL SERVIDOR")
         status_lbl.setObjectName("sectionLabel")
@@ -1141,7 +1227,7 @@ class MainWindow(QMainWindow):
         self.label_estado = QLabel("Sin configuración")
         self.label_estado.setWordWrap(True)
         self.label_estado.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.label_estado.setMinimumHeight(56)
+        self.label_estado.setMinimumHeight(44)
         self._set_status("Sin configuración", "default")
         content_layout.addWidget(self.label_estado)
 
@@ -1151,7 +1237,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
 
-        self.boton_verificar = QPushButton("Verificar estado")
+        self.boton_verificar = QPushButton("🔄 Actualizar diagnóstico")
         self.boton_verificar.setObjectName("btnSecondary")
         self.boton_verificar.clicked.connect(self.verificar_servidor_manual)
         btn_row.addWidget(self.boton_verificar)
@@ -1162,6 +1248,12 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(boton_guardar)
 
         content_layout.addLayout(btn_row)
+
+        self.boton_detener = QPushButton("⏹ Detener proceso y salir")
+        self.boton_detener.setObjectName("btnDanger")
+        self.boton_detener.clicked.connect(self.detener_y_salir)
+        content_layout.addWidget(self.boton_detener)
+
         root.addWidget(content)
         
     def setup_system_tray(self):
@@ -1331,10 +1423,127 @@ class MainWindow(QMainWindow):
         
         # Verificar que el servidor esté realmente activo
         self.actualizar_estado_servidor()
-    
+        self.actualizar_verificacion_ui()
+
+    def actualizar_verificacion_ui(self):
+        """Actualiza en tiempo real los indicadores de diagnóstico en la interfaz"""
+        if not hasattr(self, 'checks') or not self.checks:
+            return
+
+        global cloudflared_url, cloudflared_process, cloudflared_sync_status
+        config = cargar_configuracion()
+        
+        estados_ok = 0
+        total_checks = 6
+        
+        def set_item(key, status, text, tip=""):
+            # status: "ok", "warn", "error", "pending"
+            colors = {
+                "ok": "#3fb950",
+                "warn": "#d29922",
+                "error": "#f85149",
+                "pending": "#7d8590",
+            }
+            color = colors.get(status, "#7d8590")
+            item = self.checks[key]
+            item["dot"].setStyleSheet(f"color: {color}; font-size: 14px;")
+            item["value"].setText(text)
+            item["value"].setStyleSheet(f"color: {color}; font-size: 11px;")
+            if tip:
+                item["value"].setToolTip(tip)
+                item["title"].setToolTip(tip)
+
+        # 1. Configuración
+        if config and config.get("usuario") and config.get("pin"):
+            usr = config.get("usuario")
+            srv = config.get("servidor", DEFAULT_SERVER)
+            set_item("config", "ok", f"OK ({usr})", f"Usuario: {usr}\nServidor: {srv}")
+            estados_ok += 1
+        else:
+            set_item("config", "error", "Incompleta", "Falta usuario o PIN en la configuración")
+
+        # 2. Impresora
+        impresoras_sistema = listar_impresoras()
+        imp_config = config.get("impresora") if config else self.combo_impresora.currentText()
+        if imp_config and imp_config in impresoras_sistema:
+            imp_corta = imp_config if len(imp_config) <= 20 else imp_config[:18] + "..."
+            set_item("impresora", "ok", f"Lista ({imp_corta})", f"Impresora disponible: {imp_config}")
+            estados_ok += 1
+        elif imp_config:
+            set_item("impresora", "error", "No encontrada", f"La impresora '{imp_config}' no está en la lista del sistema")
+        else:
+            set_item("impresora", "warn", "Sin seleccionar", "Por favor selecciona una impresora")
+
+        # 3. Servidor Local HTTP
+        servidor_activo, msg_srv = verificar_servidor_activo()
+        if servidor_activo:
+            set_item("servidor", "ok", f"Activo (puerto {CONFIG_SERVIDOR['port']})", f"http://localhost:{CONFIG_SERVIDOR['port']}/status")
+            estados_ok += 1
+        else:
+            puerto_libre = verificar_puerto_disponible("127.0.0.1", CONFIG_SERVIDOR["port"])
+            if not puerto_libre:
+                set_item("servidor", "warn", "Iniciando...", "El puerto está en uso, esperando respuesta HTTP")
+            else:
+                set_item("servidor", "error", "No responde", f"Error: {msg_srv}")
+
+        # 4. Binario cloudflared
+        if existe_cloudflared():
+            ruta = obtener_ruta_cloudflared()
+            nombre = os.path.basename(ruta)
+            set_item("cloudflared_bin", "ok", f"Disponible ({nombre})", f"Ruta: {ruta}")
+            estados_ok += 1
+        else:
+            set_item("cloudflared_bin", "error", "Falta cloudflared.exe", f"No se encontró en '{DIRECTORIO_APLICACION}' ni en PATH")
+
+        # 5. Túnel Cloudflare
+        tunel_corriendo = cloudflared_process is not None and cloudflared_process.poll() is None
+        if tunel_corriendo and cloudflared_url:
+            url_corta = cloudflared_url.replace("https://", "")
+            if len(url_corta) > 22:
+                url_corta = url_corta[:20] + "..."
+            set_item("tunel", "ok", url_corta, f"URL pública: {cloudflared_url}")
+            estados_ok += 1
+        elif tunel_corriendo:
+            set_item("tunel", "warn", "Generando URL...", "El túnel está conectando con Cloudflare...")
+        elif not existe_cloudflared():
+            set_item("tunel", "error", "Falta ejecutable", "Descarga cloudflared.exe para activar el túnel")
+        else:
+            set_item("tunel", "error", "Inactivo", "El túnel no se está ejecutando")
+
+        # 6. Sincronización Web
+        if cloudflared_sync_status == "ok":
+            set_item("sync", "ok", "Sincronizado", "La URL se registró exitosamente en el servidor web")
+            estados_ok += 1
+        elif cloudflared_sync_status == "pending":
+            set_item("sync", "warn", "Enviando URL...", "Registrando URL en el servidor...")
+        elif cloudflared_sync_status.startswith("error"):
+            set_item("sync", "error", "Error al enviar", cloudflared_sync_status)
+        elif not cloudflared_url:
+            set_item("sync", "pending", "Esperando túnel", "Requiere que el túnel genere la URL primero")
+        else:
+            set_item("sync", "pending", "Pendiente", "Aún no se ha enviado la URL al servidor")
+
+        # Resumen general y header dot
+        if estados_ok == total_checks:
+            self.lbl_diag_summary.setText("🟢 Todos los servicios OK")
+            self.lbl_diag_summary.setStyleSheet("color: #3fb950; font-size: 11px; font-weight: 600;")
+            if hasattr(self, 'header_dot'):
+                self.header_dot.setStyleSheet("color: #238636; font-size: 22px; padding-bottom: 2px;")
+        elif estados_ok >= 3:
+            self.lbl_diag_summary.setText(f"🟡 {estados_ok}/{total_checks} verificaciones OK")
+            self.lbl_diag_summary.setStyleSheet("color: #d29922; font-size: 11px; font-weight: 600;")
+            if hasattr(self, 'header_dot'):
+                self.header_dot.setStyleSheet("color: #d29922; font-size: 22px; padding-bottom: 2px;")
+        else:
+            self.lbl_diag_summary.setText(f"🔴 {estados_ok}/{total_checks} verificaciones OK")
+            self.lbl_diag_summary.setStyleSheet("color: #f85149; font-size: 11px; font-weight: 600;")
+            if hasattr(self, 'header_dot'):
+                self.header_dot.setStyleSheet("color: #f85149; font-size: 22px; padding-bottom: 2px;")
+
     def actualizar_estado_servidor(self):
         """Actualiza el estado del servidor en la UI"""
         config = cargar_configuracion()
+        self.actualizar_verificacion_ui()
         
         if not config:
             self._set_status("Sin configuración — complete los campos y guarde.", "default")
@@ -1365,8 +1574,9 @@ class MainWindow(QMainWindow):
     
     def verificar_servidor_manual(self):
         """Verifica manualmente el estado del servidor y muestra información detallada"""
+        self.actualizar_verificacion_ui()
         config = cargar_configuracion()
-        global cloudflared_url, cloudflared_process
+        global cloudflared_url, cloudflared_process, cloudflared_sync_status
         
         mensaje_detalle = []
         mensaje_detalle.append("=== DIAGNÓSTICO DEL SERVIDOR ===\n")
@@ -1410,7 +1620,6 @@ class MainWindow(QMainWindow):
                 mensaje_detalle.append(f"   - URL para la web HTTPS: {cloudflared_url}")
                 mensaje_detalle.append(f"   - Esta es la URL que debe usar tu aplicación web")
                 mensaje_detalle.append(f"   - Ejemplo: {cloudflared_url}/abrir-caja")
-                mensaje_detalle.append(f"   - ✅ URL enviada automáticamente al servidor web")
             else:
                 mensaje_detalle.append("   - URL pública: Generándose... (espera unos segundos)")
         else:
@@ -1421,6 +1630,18 @@ class MainWindow(QMainWindow):
             mensaje_detalle.append("   - CRÍTICO: Sin túnel, la web HTTPS no puede conectarse")
             mensaje_detalle.append("   - El túnel se inicia automáticamente cuando el servidor está activo")
         
+        mensaje_detalle.append("")
+
+        # Sincronización Web
+        if cloudflared_sync_status == "ok":
+            mensaje_detalle.append("✅ Sincronización Web: OK (URL enviada al servidor central)")
+        elif cloudflared_sync_status == "pending":
+            mensaje_detalle.append("🟡 Sincronización Web: Enviando URL al servidor...")
+        elif cloudflared_sync_status.startswith("error"):
+            mensaje_detalle.append(f"❌ Sincronización Web: {cloudflared_sync_status}")
+        else:
+            mensaje_detalle.append("⚪ Sincronización Web: Pendiente")
+
         mensaje_detalle.append("")
         mensaje_detalle.append("=== RECOMENDACIONES ===")
         
@@ -1448,25 +1669,49 @@ class MainWindow(QMainWindow):
         # Actualizar estado después de la verificación
         self.actualizar_estado_servidor()
     
+    def detener_y_salir(self):
+        """Detiene completamente el servidor y cierra la aplicación tras confirmación"""
+        reply = QMessageBox.question(
+            self,
+            "Detener servidor",
+            "¿Deseas detener el servidor y salir de la aplicación?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.cerrar_aplicacion()
+
     def cerrar_aplicacion(self):
-        """Cierra completamente la aplicación"""
+        """Cierra completamente la aplicación y detiene todos los procesos"""
         global cloudflared_process
-        
+        print("INFO: Deteniendo todos los servicios y cerrando la aplicación...")
+
+        # Detener temporizador de diagnóstico
+        if hasattr(self, 'timer_diagnostico'):
+            try:
+                self.timer_diagnostico.stop()
+            except Exception:
+                pass
+
         # Detener cloudflared si está ejecutándose
         if cloudflared_process and cloudflared_process.poll() is None:
             try:
                 cloudflared_process.terminate()
                 try:
-                    cloudflared_process.wait(timeout=5)
+                    cloudflared_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     cloudflared_process.kill()
                 logger.info("Proceso cloudflared terminado")
+                print("INFO: Proceso cloudflared terminado.")
             except Exception as e:
                 logger.error(f"Error al terminar cloudflared: {e}")
-        
+
         if hasattr(self, 'tray_icon'):
             self.tray_icon.hide()
+
         QApplication.quit()
+        # Forzar terminación del proceso para liberar terminal y puerto inmediatamente
+        os._exit(0)
 
 
 def main():

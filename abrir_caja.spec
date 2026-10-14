@@ -27,6 +27,7 @@ a = Analysis(
         'win32api',
         'win32con',
         'win32print',
+        'requests',
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
