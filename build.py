@@ -7,6 +7,15 @@ import sys
 import subprocess
 import shutil
 
+# Configurar encoding seguro para consola en Windows (evita UnicodeEncodeError con emojis)
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 def main():
     print("🚀 Iniciando compilación de Abrir Caja...")
     
@@ -109,7 +118,7 @@ def main():
 
         for archivo in archivos_a_copiar:
             if os.path.exists(archivo):
-                shutil.copy2(archivo, "dist/")
+                shutil.copy2(archivo, os.path.join("dist", archivo))
                 print(f"📋 Copiado a dist/: {archivo}")
 
         # Asegurar config.json por defecto en dist/ si no existe
@@ -120,7 +129,7 @@ def main():
                 "pin": "",
                 "impresora": ""
             }
-            with open("dist/config.json", "w", encoding="utf-8") as f:
+            with open(os.path.join("dist", "config.json"), "w", encoding="utf-8") as f:
                 json.dump(default_config, f, ensure_ascii=False, indent=2)
             print("📋 Archivo dist/config.json creado por defecto")
 
@@ -132,6 +141,7 @@ def main():
 
     except subprocess.CalledProcessError as e:
         print(f"❌ Error durante la compilación: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
