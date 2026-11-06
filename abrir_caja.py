@@ -72,6 +72,7 @@ SERVERS = {
     "QA (ADM)":          "https://adm.premium-soft.com/qa",
     "Colombia (COLADM)": "https://coladm.premium-soft.com/ADMCOL",
     "Colombia VIP":      "https://colvip.premium-soft.com/ADMCOLGRAlVIP",
+    "Local (adminbiz)":  "http://adminbiz.local",
 }
 DEFAULT_SERVER = "Normal (ADM)"
 
@@ -558,7 +559,8 @@ def _send_cloudflare_url_to_server(url: str) -> bool:
         data = {
             "pin": str(pin),
             "url": str(url),
-            "id_agencia": ""  # Para abrir_caja no usamos agencia, se guarda como default
+            "id_agencia": "",  # Para abrir_caja no usamos agencia, se guarda como default
+            "tipo": "caja"     # El servidor distingue caja vs impresión por este campo
         }
         
         cloudflared_sync_status = "pending"
@@ -646,6 +648,24 @@ def _send_cloudflare_url_to_server(url: str) -> bool:
         logger.error(traceback.format_exc())
         cloudflared_sync_status = "error: inesperado"
         return False
+
+
+def enviar_url_con_reintentos(url: str, intentos: int = 6, espera: int = 5):
+    """Envía la URL al servidor web en segundo plano, reintentando si falla"""
+    def _worker():
+        time.sleep(2)  # Esperar a que el túnel esté estable
+        for i in range(intentos):
+            if cloudflared_url != url:
+                return  # La URL cambió; otro envío se encargará
+            try:
+                if _send_cloudflare_url_to_server(url):
+                    return
+            except Exception as e:
+                logger.warning(f"No se pudo actualizar la URL en el servidor web: {e}")
+            if i < intentos - 1:
+                time.sleep(espera * (i + 1))
+        logger.error("No se pudo sincronizar la URL con el servidor web tras varios intentos")
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def obtener_ruta_cloudflared():
@@ -741,16 +761,17 @@ def _start_cloudflared_tunnel():
                 
                 # Intentar actualizar la URL en el servidor web automáticamente
                 # Hacerlo en un hilo separado para no bloquear
-                def enviar_url_async():
+                enviar_url_con_reintentos(cloudflared_url)
+
+                # Seguir leyendo la salida para que el pipe no se llene y bloquee cloudflared
+                def drenar_salida(proc):
                     try:
-                        time.sleep(1)  # Esperar un momento para asegurar que el túnel esté estable
-                        _send_cloudflare_url_to_server(cloudflared_url)
-                    except Exception as e:
-                        logger.warning(f"No se pudo actualizar la URL en el servidor web: {e}")
-                        print(f"ADVERTENCIA: No se pudo actualizar la URL automáticamente en el servidor web")
-                
-                threading.Thread(target=enviar_url_async, daemon=True).start()
-                
+                        for _ in proc.stdout:
+                            pass
+                    except Exception:
+                        pass
+                threading.Thread(target=drenar_salida, args=(cloudflared_process,), daemon=True).start()
+
                 break
             
             logger.debug(f"Cloudflared output: {line.strip()}")
@@ -1391,6 +1412,9 @@ class MainWindow(QMainWindow):
                 "servidor": servidor,
             }
             self.iniciar_servidor()
+            # Si el túnel ya existe, reenviar la URL con la nueva configuración (PIN/servidor)
+            if cloudflared_url:
+                enviar_url_con_reintentos(cloudflared_url)
             self.actualizar_estado_servidor()
         else:
             QMessageBox.critical(self, "Error", "No se pudo guardar la configuración.")
